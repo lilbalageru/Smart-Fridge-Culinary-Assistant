@@ -33,7 +33,7 @@ You will need [Node.js](https://nodejs.org/) (v18 or newer) installed on your co
 
 1.  **Clone the repository:**
     ```sh
-    git clone  (https://github.com/lilbalageru/Smart-Fridge-Culinar
+    git clone https://github.com/lilbalageru/Smart-Fridge-Culinar
     cd smart-fridge-assistant
     ```
 
