@@ -1,0 +1,194 @@
+import {
+  GoogleGenerativeAI,
+  GenerationConfig,
+  HarmCategory,
+  HarmBlockThreshold,
+  GenerateContentRequest,
+} from '@google/genai';
+import { GeminiResponse, Recipe, Ingredient } from '../types';
+
+// NOTE: Your API key is loaded from .env.local via Vite's import.meta.env
+// This is a CLIENT-SIDE key.
+const apiKey = import.meta.env.GEMINI_API_KEY;
+if (!apiKey) {
+  throw new Error('GEMINI_API_KEY is not set in .env.local');
+}
+
+const genAI = new GoogleGenerativeAI(apiKey);
+const model = genAI.getGenerativeModel({
+  model: 'gemini-2.5-flash-preview-09-2025',
+});
+
+// --- Schema Definition ---
+// This tells the model EXACTLY what JSON structure to return.
+// It's based on your `types.ts` file.
+
+const ingredientSchema = {
+  type: 'OBJECT',
+  properties: {
+    name: { type: 'STRING' },
+    quantity: { type: 'STRING' },
+  },
+  required: ['name', 'quantity'],
+};
+
+const recipeSchema = {
+  type: 'OBJECT',
+  properties: {
+    name: { type: 'STRING' },
+    description: { type: 'STRING' },
+    difficulty: {
+      type: 'STRING',
+      enum: ['Easy', 'Medium', 'Hard'],
+    },
+    prepTime: { type: 'STRING' },
+    calories: { type: 'NUMBER' },
+    ingredients: {
+      type: 'ARRAY',
+      items: ingredientSchema,
+    },
+    steps: {
+      type: 'ARRAY',
+      items: { type: 'STRING' },
+    },
+    missingPrimaryIngredients: {
+      type: 'ARRAY',
+      items: { type: 'STRING' },
+    },
+  },
+  required: [
+    'name',
+    'description',
+    'difficulty',
+    'prepTime',
+    'calories',
+    'ingredients',
+    'steps',
+    'missingPrimaryIngredients',
+  ],
+};
+
+const geminiResponseSchema = {
+  type: 'OBJECT',
+  properties: {
+    identifiedIngredients: {
+      type: 'ARRAY',
+      items: { type: 'STRING' },
+    },
+    recipes: {
+      type: 'ARRAY',
+      items: recipeSchema,
+    },
+  },
+  required: ['identifiedIngredients', 'recipes'],
+};
+
+// --- Generation Configuration ---
+const generationConfig: GenerationConfig = {
+  responseMimeType: 'application/json',
+  responseSchema: geminiResponseSchema,
+  temperature: 0.7,
+  topP: 1,
+  topK: 32,
+  maxOutputTokens: 8192,
+};
+
+// --- Safety Settings ---
+const safetySettings = [
+  {
+    category: HarmCategory.HARM_CATEGORY_HARASSMENT,
+    threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+  },
+  {
+    category: HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+    threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+  },
+  {
+    category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+    threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+  },
+  {
+    category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+    threshold: HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE,
+  },
+];
+
+// --- Main API Function ---
+
+/**
+ * Analyzes a fridge image and suggests recipes.
+ * @param base64ImageData The base64-encoded image data (without the data: prefix).
+ * @param dietaryFilters An array of strings (e.g., "Vegan", "Gluten-Free").
+ * @returns A promise that resolves to the structured GeminiResponse.
+ */
+export const analyzeFridgeAndSuggestRecipes = async (
+  base64ImageData: string,
+  dietaryFilters: string[]
+): Promise<GeminiResponse> => {
+  const dietaryPrompt =
+    dietaryFilters.length > 0
+      ? `
+    Please ensure all suggested recipes adhere to the following dietary restrictions: ${dietaryFilters.join(
+      ', '
+    )}.
+    If a recipe cannot be made to fit these restrictions, do not include it.`
+      : '';
+
+  const systemPrompt = `
+    You are an expert culinary assistant. A user has provided an image of their fridge.
+    
+    Your task is to:
+    1.  Identify all visible, usable food ingredients in the image.
+    2.  Generate 3-5 creative recipes that primarily use these identified ingredients.
+    3.  For each recipe, clearly list any primary ingredients that are *missing* and would need to be purchased. Do not list common pantry staples like salt, pepper, or oil as "missing" unless they are a key, named ingredient (e.g., "Truffle Oil").
+    4.  Provide all details for each recipe as defined in the JSON schema.
+    5.  ${dietaryPrompt}
+    
+    Return your analysis *only* as a valid JSON object matching the provided schema.
+  `;
+
+  const imagePart = {
+    inlineData: {
+      mimeType: 'image/jpeg', // Assuming JPG, but your uploader might need to specify
+      data: base64ImageData,
+    },
+  };
+
+  const request: GenerateContentRequest = {
+    contents: [
+      {
+        role: 'user',
+        parts: [imagePart],
+      },
+    ],
+    systemInstruction: {
+      role: 'system',
+      parts: [{ text: systemPrompt }],
+    },
+    generationConfig,
+    safetySettings,
+  };
+
+  try {
+    const result = await model.generateContent(request);
+    const response = result.response;
+    
+    if (!response.candidates?.[0]?.content?.parts?.[0]?.text) {
+        throw new Error("Invalid response structure from Gemini API.");
+    }
+
+    const jsonText = response.candidates[0].content.parts[0].text;
+    const parsedJson = JSON.parse(jsonText) as GeminiResponse;
+    return parsedJson;
+
+  } catch (error) {
+    console.error('Error calling Gemini API:', error);
+    let errorMessage = 'Failed to get recipes from AI.';
+    if (error.response?.candidates?.[0]?.finishReason === 'SAFETY') {
+        errorMessage = "The request was blocked due to safety concerns. Please try a different image.";
+    } else if (error.message) {
+        errorMessage = error.message;
+    }
+    throw new Error(errorMessage);
+  }
+};
